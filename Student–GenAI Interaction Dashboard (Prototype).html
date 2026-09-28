@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Student–GenAI Interaction Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="./dashboard_data.js"></script>
+<script src="./claude_data.js"></script>
+<style>
+  :root {
+    --bg: #f7f7fb; --card: #ffffff; --ink: #1f2430; --sub: #6b7280; --line: #e7e7ee;
+    --accent: #6d5ee3;
+    --clarification:#5B8DEF; --collaboration:#2BB3A3; --background:#9B8AFB; --task:#F2994A; --verification:#C15C9E;
+    padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+    box-sizing: border-box;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg:#15161c; --card:#1e2028; --ink:#eceef2; --sub:#9aa0ab; --line:#2b2d36;
+  }}
+  :root[data-theme="dark"] { --bg:#15161c; --card:#1e2028; --ink:#eceef2; --sub:#9aa0ab; --line:#2b2d36; }
+  * { box-sizing: border-box; }
+  html,body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width:1000px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:18px; margin:4px 0 2px; }
+  .note { color:var(--sub); font-size:12.5px; margin-bottom:18px; }
+  .note-pill {
+    display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line);
+    border-radius:999px; padding:5px 9px; background:rgba(109,94,227,.05); color:var(--sub);
+    font-size:11.5px; cursor:help; user-select:none;
+  }
+  .grid { display:flex; gap:16px; flex-wrap:wrap; }
+  .left { flex:1 1 280px; max-width:320px; }
+  .right { flex:2 1 460px; min-width:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .tabs { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { border:1px solid var(--line); background:transparent; color:var(--ink); padding:6px 12px; border-radius:999px; font-size:12.5px; cursor:pointer; }
+  .tab.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .legend { display:flex; flex-direction:column; gap:8px; margin-top:14px; font-size:12.5px; }
+  .legend .row { display:flex; align-items:center; gap:8px; color:var(--sub); }
+  .dot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+  .chatlist { display:flex; flex-direction:column; gap:10px; overflow-x:auto; }
+  .chat { border:1px solid var(--line); border-left:5px solid var(--accent); border-radius:10px; padding:12px 14px; cursor:pointer; background:var(--card); }
+  .chat .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .chat .title { font-weight:600; font-size:14px; }
+  .chat .meta { color:var(--sub); font-size:11.5px; margin-top:3px; }
+  .tag { font-size:10.5px; padding:2px 8px; border-radius:999px; color:#fff; white-space:nowrap; }
+  .detail { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--sub); display:none; }
+  .detail.open { display:block; }
+  .breakdown { margin-top:8px; display:grid; gap:6px; }
+  .breakdown-row { display:grid; grid-template-columns: 90px 1fr 40px; align-items:center; gap:8px; }
+  .breakdown-label { font-size:10.5px; color:var(--sub); }
+  .breakdown-bar { height:8px; border-radius:999px; background:rgba(148,163,184,.18); overflow:hidden; }
+  .breakdown-bar > span { display:block; height:100%; border-radius:999px; }
+  .breakdown-pct { font-size:10.5px; color:var(--ink); text-align:right; }
+  .suggestion { margin-top:6px; color:var(--ink); }
+  .suggestion b { color:var(--accent); }
+  svg text { fill: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div style="text-align:center; margin-bottom:18px;">
+    <h1 style="margin:0; font-size:24px;">KnowMiDashboard</h1>
+    <div class="note-pill" title="How to read: five dimensions track interaction patterns: clarification, collaboration, background, task execution, and verification.">How to read</div>
+  </div>
+  <div class="grid">
+    <div class="left">
+      <div class="card">
+        <div class="tabs" id="tabs"></div>
+        <svg id="donut" width="100%" viewBox="0 0 220 220"></svg>
+        <div class="legend" id="legend"></div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="card">
+        <div class="chatlist" id="chatlist"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TYPES = {
+  clarification: { label:"Clarification", color:"var(--clarification)", hex:"#5B8DEF" },
+  collaboration: { label:"Collaboration", color:"var(--collaboration)", hex:"#2BB3A3" },
+  background: { label:"Background", color:"var(--background)", hex:"#9B8AFB" },
+  task: { label:"Task Execution", color:"var(--task)", hex:"#F2994A" },
+  verification: { label:"Verification", color:"var(--verification)", hex:"#C15C9E" }
+};
+
+/**
+ * Sorts the five dimensions by score and returns the dominant and secondary category.
+ *
+ * @param {object} pct - Percentage distribution for the five dimensions.
+ * @returns {{dominant: object|null, secondary: object|null}} Top two categories by weight.
+ */
+function getTopCategoryPair(pct = {}) {
+  const categories = Object.entries(TYPES).map(([key, meta]) => ({
+    key,
+    label: meta.label,
+    value: Number(pct[key] || 0)
+  })).sort((a, b) => b.value - a.value);
+
+  return {
+    dominant: categories[0] || null,
+    secondary: categories[1] || null
+  };
+}
+
+/**
+ * Constructs a personalized suggestion using the dominant and secondary interaction dimension.
+ *
+ * @param {object} pct - Percentage distribution for the five dimensions.
+ * @returns {string} Guidance text for the conversation.
+ */
+function buildSuggestion(pct = {}) {
+  const { dominant, secondary } = getTopCategoryPair(pct);
+  if (!dominant) return "This conversation is fairly balanced across question types.";
+
+  const dominantKey = dominant.key;
+  const secondaryKey = secondary && secondary.value > 0 ? secondary.key : null;
+
+  if (dominantKey === 'verification' && secondaryKey === 'task') {
+    return "You verify thoroughly before acting. Consider exploring collaborative debugging first.";
+  }
+  if (dominantKey === 'verification' && secondaryKey === 'clarification') {
+    return "You verify outcomes carefully. Consider asking a clarifying question before the next check.";
+  }
+  if (dominantKey === 'task' && secondaryKey === 'verification') {
+    return "You focus on execution, but verification can strengthen the result. Try validating before finalizing.";
+  }
+  if (dominantKey === 'collaboration' && secondaryKey === 'task') {
+    return "You co-develop ideas effectively. Consider turning the collaboration into a clearer task plan.";
+  }
+  if (dominantKey === 'background' && secondaryKey === 'clarification') {
+    return "You frame the context well. Consider narrowing the question to sharpen the next clarification step.";
+  }
+  if (dominantKey === 'clarification' && secondaryKey === 'task') {
+    return "You ask clear questions before acting. Consider moving from clarification into a faster task prototype.";
+  }
+
+  return {
+    clarification: "You clarify key concepts well. Keep asking what the task is really trying to achieve.",
+    collaboration: "You iterate with the AI in a collaborative way. Try extending that loop with a concrete action plan.",
+    background: "You set the context well. Try moving from context-setting to a sharper question sooner.",
+    task: "You favor direct execution. Consider balancing it with a quick check for understanding or validation.",
+    verification: "You test outputs carefully. Continue checking assumptions before acting on recommendations."
+  }[dominantKey] || "This conversation is fairly balanced across question types.";
+}
+
+/**
+ * Emits a concise interpretation of the conversation profile using the top one or two categories.
+ *
+ * @param {object} pct - Percentage distribution for the five dimensions.
+ * @returns {string} Narrative hint for the conversation.
+ */
+function pickHint(pct = {}) {
+  const p = {
+    clarification: Number(pct.clarification || 0),
+    collaboration: Number(pct.collaboration || 0),
+    background: Number(pct.background || 0),
+    task: Number(pct.task || 0),
+    verification: Number(pct.verification || 0)
+  };
+
+  if (p.task >= 40 && (p.clarification + p.verification) < 20) {
+    return "This leans toward executive help-seeking — asking the AI to complete the task outright. Instrumental help-seeking (asking for hints or explanations) is linked to stronger retention and independent problem-solving (Aleven et al., 2003).";
+  }
+  if (p.collaboration >= 30) {
+    return "This reflects sustained back-and-forth refinement — a pattern associated with more instrumental, learning-focused engagement.";
+  }
+  if (p.verification >= 25) {
+    return "A meaningful share of this conversation is spent verifying outputs — a good habit when working with generative AI.";
+  }
+  if (p.background >= 35 && (p.task + p.clarification) < 30) {
+    return "This conversation spends a large share of turns on context-setting. Consider moving to a specific question sooner.";
+  }
+  return buildSuggestion(p);
+}
+
+const DATA_FALLBACK = [
+  {model:"ChatGPT", date:"2026-09-22", duration:"1003 min", type:"background", title:"小米知识管理回答"},
+  {model:"ChatGPT", date:"2026-09-20", duration:"1 min", type:"background", title:"修改简历与联系导师"},
+  {model:"ChatGPT", date:"2026-09-19", duration:"2517 min", type:"background", title:"生成关系类图"},
+  {model:"ChatGPT", date:"2026-09-18", duration:"73 min", type:"verification", title:"英文科研邮件修改"},
+  {model:"ChatGPT", date:"2026-09-16", duration:"114 min", type:"background", title:"Ontology评分与Protégé修正"},
+  {model:"ChatGPT", date:"2026-09-16", duration:"1508 min", type:"clarification", title:"优化ACT1时间线逻辑"},
+  {model:"ChatGPT", date:"2026-09-16", duration:"1253 min", type:"task", title:"生成作业提示词"}
+];
+
+const DATA = (window.DASHBOARD_DATA || DATA_FALLBACK).concat(window.CLAUDE_DATA || []);
+
+let activeModel = "All";
+const modelTabs = ["All", "ChatGPT", "Claude"];
+
+/**
+ * Returns the active model subset used by the dashboard.
+ *
+ * @returns {object[]} Current visible conversation rows.
+ */
+function currentData() {
+  return activeModel === "All" ? DATA : DATA.filter(d => d.model === activeModel);
+}
+
+/**
+ * Renders the model filter tabs.
+ */
+function renderTabs() {
+  const tabs = d3.select("#tabs").selectAll(".tab").data(modelTabs);
+  tabs.join("button")
+    .attr("class", m => "tab" + (m === activeModel ? " active" : ""))
+    .text(m => m)
+    .on("click", (e, m) => { activeModel = m; renderAll(); });
+}
+
+/**
+ * Renders the color legend for the five interaction dimensions.
+ */
+function renderLegend() {
+  const rows = d3.select("#legend").selectAll(".row").data(Object.entries(TYPES));
+  const enter = rows.join("div").attr("class", "row");
+  enter.html(([k, v]) => `<span class="dot" style="background:${v.hex}"></span>${v.label}`);
+}
+
+/**
+ * Draws the donut chart for visible conversations.
+ */
+function renderDonut() {
+  const svg = d3.select("#donut");
+  svg.selectAll("*").remove();
+  const counts = {};
+  currentData().forEach(d => counts[d.type] = (counts[d.type] || 0) + 1);
+  const entries = Object.entries(counts);
+  const g = svg.append("g").attr("transform", "translate(110,110)");
+  if (entries.length === 0) return;
+  const pie = d3.pie().value(d => d[1]).sort(null);
+  const arc = d3.arc().innerRadius(60).outerRadius(95);
+  g.selectAll("path").data(pie(entries)).join("path")
+    .attr("d", arc)
+    .attr("fill", d => TYPES[d.data[0]].hex)
+    .attr("stroke", "var(--bg)").attr("stroke-width", 2);
+  g.append("text").attr("text-anchor", "middle").attr("dy", "0.1em")
+    .style("font-size", "22px").style("font-weight", "700").text(currentData().length);
+  g.append("text").attr("text-anchor", "middle").attr("dy", "1.4em")
+    .style("font-size", "11px").style("fill", "var(--sub)").text("chats");
+}
+
+/**
+ * Renders the visible conversation rows and expands the detail panel on click.
+ */
+function renderList() {
+  const list = d3.select("#chatlist").selectAll(".chat").data(currentData());
+
+  list.join("div")
+    .attr("class", "chat")
+    .style("border-left-color", d => TYPES[d.type].hex)
+    .html(d => `
+      <div class="top">
+        <div>
+          <div class="title">${d.title}</div>
+          <div class="meta">${d.model} · ${d.date} · ${d.duration}</div>
+        </div>
+        <span class="tag" style="background:${TYPES[d.type].hex}">${TYPES[d.type].label}</span>
+      </div>
+      <div class="detail">
+        <div>Conversation length: ${d.duration}, on ${d.date} via ${d.model}.</div>
+        <div class="breakdown">
+          ${Object.entries(TYPES).map(([key, v]) => {
+            const pct = d.scores && d.scores[key] != null ? d.scores[key] : (key === d.type ? 100 : 0);
+            return `
+              <div class="breakdown-row">
+                <div class="breakdown-label">${v.label}</div>
+                <div class="breakdown-bar"><span style="width:${pct}%; background:${v.hex};"></span></div>
+                <div class="breakdown-pct">${pct}%</div>
+              </div>`;
+          }).join('')}
+        </div>
+        <div class="suggestion"><b>Hint:</b> ${pickHint(d.scores || {})}</div>
+      </div>
+    `)
+    .on("click", function() {
+      const el = d3.select(this).select(".detail");
+      el.classed("open", !el.classed("open"));
+    });
+}
+
+/**
+ * Updates all dashboard panels after a filter change or data refresh.
+ */
+function renderAll() { renderTabs(); renderLegend(); renderDonut(); renderList(); }
+renderAll();
+</script>
+</body>
+</html>
